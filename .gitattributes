@@ -1,5 +1,5 @@
 * text=auto
-*.mjs text eol=lf
+*.rs text eol=lf
 *.grf binary
 *.grfp binary
-*.gxe binary
+*.bin binary

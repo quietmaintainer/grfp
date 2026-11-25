@@ -1,0 +1,20 @@
+[package]
+name = "grfp"
+version = "0.2.0"
+edition = "2024"
+description = "Lossless file recipe archives with Reed–Solomon recovery"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+filetime = "0.2.29"
+memchr = "2.7"
+ring = "0.17.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.27"
+walkdir = "2.5"
+zeroize = "1.9"

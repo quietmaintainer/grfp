@@ -1,4 +1,1 @@
-node_modules/
-*.cpuprofile
-*.wasm
-__pycache__/
+/target/

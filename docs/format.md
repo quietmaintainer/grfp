@@ -1,6 +1,6 @@
 # GRP1 wire format
 
-`.grfp` files wrap the exact encoded groups of a GRF1 or compatible GRL recipe. GRP1 identifies the outer frame format.
+`.grfp` wraps encoded recipe groups in the GRP1 frame format. The Rust implementation uses the `global16` layout.
 
 ## Frame header
 
@@ -20,17 +20,36 @@ The reader accepts a frame after verifying its header, length, and digest. After
 
 ## Catalog and inner recipe
 
-The UTF-8 JSON catalog describes the original length and SHA-256, the inner recipe's footer digest, the parity layout and percentage, and the encoder profile. For each group it records the wire length, the original-group identifier, and the wire SHA-256. The GRF1 group identifier is its original SHA-256. In protected GRL it is the SHA-256 of the ordered page hashes, and the catalog also carries the exact inner header.
+The UTF-8 JSON catalog describes the original length, the inner recipe's footer digest, the `global16` layout, the parity percentage, and the encoder profile. In plaintext archives it includes the original SHA-256. Each group entry records its wire length, original-group SHA-256, and wire SHA-256. The inner group encoding is `grf1-group-v1`.
 
-GRF1 groups cover up to 256 KiB of original data. A protected GRL group is a checkpoint record, including its length prefix. `grl-checkpoint-v1` covers the independent 256/256 GRL1 layout and restartable GRL2–GRL4. `grf1-group-v1` carries the GRF1 encoding profile.
+The optional `blockSize` field gives the number of original bytes per recipe group, with a 256 KiB default. Allowed values are powers of two from 4 KiB through 256 KiB. A GRF1 inner header is `GRF1` followed by the eight-byte original length. A GRF2 header uses `GRF2`, the original length, and a four-byte block size for a non-default block size. Both are followed by recipe groups and a 32-byte SHA-256 of the header and encoded groups.
 
-## Parity layouts
+The systematic shards are the length-prefixed catalog, split into 64 KiB pieces, followed by the recipe groups. The catalog length prefix is a four-byte little-endian integer. The index packs the total systematic count `d` in the high 16 bits and the shard or parity ordinal in the low 16 bits. A single-file archive stores type-3 systematic frames, then type-4 parity frames, then a type-0 catalog copy with index zero.
 
-Both layouts use systematic Cauchy Reed–Solomon parity. A short shard is zero-extended for arithmetic and stored at its true length. A tail catalog is stored as a type-0 frame with index zero.
+## Separate recovery volumes
 
-- **Local GF(2⁸).** The catalog's `stripe` field is 100. A type-0 catalog precedes the data as well. For each stripe, type-1 frames carry groups at their absolute indexes, followed by type-2 parity frames at the first index of the stripe plus the parity ordinal. A stripe of `k` groups gets `ceil(k × percent / 100)` parity frames, each as long as the largest wire in that stripe. The field polynomial is `0x11d` and the coefficient for local group `i` and parity row `p` is `1 / ((100 + p) XOR i)`.
-- **Global GF(2¹⁶).** The catalog's `stripe` field is `global16`. The systematic shards are the length-prefixed catalog, split into 64 KiB pieces, followed by the recipe groups. The catalog length is a four-byte little-endian integer. Type-3 systematic frames precede type-4 parity frames. The index packs the total systematic count `d` in the high 16 bits and the shard or parity ordinal in the low 16 bits. For `k` recipe groups, `r = ceil(k × percent / 100)`, with `d + r ≤ 65,535`. The field polynomial is `0x1100b` and the coefficient is `1 / ((d + p) XOR i)`. Adjacent bytes form a little-endian symbol, with a zero high byte for an odd tail. The global symbol interval is the largest systematic shard length rounded up to an even byte count.
+Split archives keep their systematic frames and type-0 catalog in the primary file. Volume `v`, numbered from one, holds parity rows whose zero-based ordinal modulo the volume count equals `v - 1`. Each volume has its own type-0 copy of the same catalog. Distribution leaves frame coordinates and the archive ID intact. A reader can assemble frames from all supplied paths that match that ID. Full recovery emits the consolidated layout.
 
-Both layouts accept a whole-number parity percentage from 0 to 100. A global archive with `r` parity rows covers any `r` complete frame erasures, including losses that affect the catalog. With local parity, each stripe must have enough parity for its own losses and a catalog copy must survive. A verified surviving original group can supply an extra equation if its encoder reproduces the exact wire.
+For split archives, the reported `protectedBytes` and `protectedSha256` cover the primary file. `parityFrames` and `parityPayloadBytes` cover all recovery volumes together.
 
-The reader verifies rebuilt group digests, the inner recipe footer, and the full original SHA-256 before publishing recovered outputs. See the frame types, bounds, and codec rules in the reference source. [Frame reader](../src/frames.mjs) · [Protection and recovery](../src/protected.mjs)
+## GF16 recovery
+
+The code uses systematic Cauchy Reed–Solomon over GF(2¹⁶), with field polynomial `0x1100b` and coefficient `1 / ((d + p) XOR i)` for parity row `p` and data coordinate `i`. Adjacent bytes form a little-endian symbol. The high byte of an odd tail is zero. The parity width is the largest systematic shard length rounded up to an even byte count. Short shards are zero-extended for arithmetic and stored at their true length.
+
+For `k` recipe groups, the parity row count is `r = ceil(k × percent / 100)`, with `d + r ≤ 65,535`. The parity percentage is a whole number from 0 to 100. An archive with `r` rows covers any `r` complete frame erasures, including losses that affect the catalog. A single damaged byte can invalidate an entire frame. A verified surviving original group can supply an extra equation when the encoder reproduces the expected wire checksum.
+
+Full recovery verifies group hashes, the inner recipe footer, and the full original SHA-256 before publishing results. It retains the exact catalog bytes and regenerates the parity and frames. Original-only recovery and extraction verify the reconstructed payload and use parity for missing groups. [Frame reader](../src/frames.rs) · [GF16 kernel](../src/gf16.rs) · [Recovery](../src/archive.rs)
+
+## Directory and named-file bundles
+
+The catalog sets `bundle` to true when the original payload is a GRB1 bundle. A bundle starts with `GRB1` and a four-byte manifest length. The UTF-8 JSON manifest lists the root entry and its descendants in parent-first order. Each entry gives a slash-delimited portable path, its file or directory kind, its byte count, modification time as Unix seconds and nanoseconds, its read-only flag, and optional ordinary Unix permission bits. File contents follow in manifest order. Extraction validates the paths and lengths and restores permissions and timestamps before placing the tree in a fresh destination.
+
+## Encryption
+
+An encrypted archive uses the `GRFE` inner header with the original length and block size. The catalog's `encryption.salt` is 32 random bytes in hexadecimal. HKDF-SHA256 derives a content key from the 32-byte secret file using that salt and the byte string `GRFP ChaCha20-Poly1305 key v1\0` as HKDF info. Each encoded recipe group uses ChaCha20-Poly1305 with its 16-byte tag appended. The 12-byte nonce is four zero bytes followed by the eight-byte zero-based group index. Associated data is the eight-byte original length, four-byte block size, and one byte for the bundle flag. Integers are little-endian. [Authenticated encryption](https://www.rfc-editor.org/rfc/rfc8439.html) · [HKDF](https://www.rfc-editor.org/rfc/rfc5869.html)
+
+The archive seals the 32-byte original SHA-256 with nonce index `2^64 - 1` and stores it in `encryption.originalDigest` as a byte array. The public `originalSha256` field is omitted and the group entries carry `null` in place of raw group SHA-256. Parity covers the ciphertext and its tags. The public catalog still exposes the payload length, encoded block lengths, and recovery geometry. Use a GRFP archive and its key to restore GRFE content.
+
+## Signatures
+
+The optional `signature` field stores a hex-encoded 32-byte Ed25519 public key and a 64-byte signature array. The signed message is the byte string `GRFP Ed25519 catalog v1\0` followed by the SHA-256 of the exact canonical catalog JSON with its `signature` field omitted. The signed catalog binds the indexed wire checksums, payload identity, and recovery settings. `inspect --trusted-key` checks the signature against an independently supplied key. `verify` also reconstructs and checks the entire payload, using the encryption key when applicable. Changing a signed archive's parity percentage requires signing a fresh catalog. [Ed25519](https://www.rfc-editor.org/rfc/rfc8032.html) · [Implementation](../src/security.rs)
